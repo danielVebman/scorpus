@@ -21,17 +21,17 @@ class Step(ABC):
   @abstractmethod
   def load(self):
     '''
-    Persists any transformed data and returns any data to be used by the caller.
+    Persists any transformed data.
     '''
     pass
 
   def run(self):
     '''
-    Runs the extract-transform-load process and returns any data returned by `load`.
+    Runs the extract-transform-load process.
     '''
     self.extract()
     self.transform()
-    return self.load()
+    self.load()
 
 
 class ReadCorpus(Step):
@@ -44,9 +44,9 @@ class ReadCorpus(Step):
     self.corpus = convokit.Corpus(filename="/root/.convokit/downloads/supreme-corpus")
   
   def transform(self):
-    self.utterances_df = self.corpus.get_utterances_dataframe()
-    conversations_df = self.corpus.get_conversations_dataframe().dropna()
-    self.speakers_df = self.corpus.get_speakers_dataframe()
+    self.utterances_df = self.corpus.get_utterances_dataframe().rename_axis('utterance_id')
+    conversations_df = self.corpus.get_conversations_dataframe().rename_axis('conversation_id').dropna()
+    self.speakers_df = self.corpus.get_speakers_dataframe().rename_axis('speaker_id')
     is_convo_post_1982 = conversations_df['meta.case_id'] \
       .apply(lambda id: int(id.split('_')[0])) >= 1982
     self.conversations_df = conversations_df[is_convo_post_1982]
@@ -55,19 +55,14 @@ class ReadCorpus(Step):
     self.utterances_df.to_csv(self.UTTERANCES_PATH)
     self.conversations_df.to_csv(self.CONVERSATIONS_PATH)
     self.speakers_df.to_csv(self.SPEAKERS_PATH)
-    return dict(
-      all_utterances=self.utterances_df,
-      all_conversations=self.conversations_df,
-      all_speakers=self.speakers_df
-    )
   
 
 class CreateChunks(Step):
   CHUNKS_PATH = 'flatfiles/chunks.csv'
 
   def extract(self):
-    self.all_utterances = pd.read_csv(ReadCorpus.UTTERANCES_PATH).set_index('id')
-    self.all_conversations = pd.read_csv(ReadCorpus.CONVERSATIONS_PATH).set_index('id')
+    self.all_utterances = pd.read_csv(ReadCorpus.UTTERANCES_PATH, index_col='utterance_id')
+    self.all_conversations = pd.read_csv(ReadCorpus.CONVERSATIONS_PATH, index_col='conversation_id')
     self.all_conversations['meta.advocates'] = self.all_conversations['meta.advocates'].apply(eval)
     self.all_conversations['meta.votes_side'] = self.all_conversations['meta.votes_side'].apply(eval)
     self.all_speakers = pd.read_csv(ReadCorpus.SPEAKERS_PATH)
@@ -190,8 +185,7 @@ class ComputeInterruptions(Step):
     interruption_rate = (all_interruptions.interrupted / (all_interruptions.n_tokens / 1000)) \
       .rename('interruption_rate').reset_index()
 
-    votes = self.all_conversations.rename(columns={'id': 'conversation_id'}) \
-      .merge(interruption_rate, on='conversation_id')
+    votes = self.all_conversations.merge(interruption_rate, on='conversation_id')
     votes['do_align'] = votes.apply(self.do_align, axis=1)
 
     self.interruptions = votes[interruption_rate.columns.to_list() + ['do_align']].dropna().copy()
@@ -205,16 +199,17 @@ class ComputeGender(Step):
   GENDER_PATH = 'flatfiles/genders.csv'
 
   def extract(self):
-    self.all_utterances = pd.read_csv(ReadCorpus.UTTERANCES_PATH).set_index('id')
-    self.all_conversations = pd.read_csv(ReadCorpus.CONVERSATIONS_PATH).set_index('id')
+    self.all_utterances = pd.read_csv(ReadCorpus.UTTERANCES_PATH, index_col='utterance_id')
+    self.all_conversations = pd.read_csv(ReadCorpus.CONVERSATIONS_PATH, index_col='conversation_id')
     self.all_conversations['meta.advocates'] = self.all_conversations['meta.advocates'].apply(eval)
     self.all_conversations['meta.votes_side'] = self.all_conversations['meta.votes_side'].apply(eval)
-    self.all_speakers = pd.read_csv(ReadCorpus.SPEAKERS_PATH).set_index('id')
+    self.all_speakers = pd.read_csv(ReadCorpus.SPEAKERS_PATH, index_col='speaker_id')
 
   def transform(self):
     from nameparser import HumanName
+    from gender_guesser.detector import Detector as GenderDetector
 
-    all_advocates = self.all_speakers.query('`meta.type` == "A"')
+    all_advocates = self.all_speakers.query('`meta.type` == "A"').rename_axis('advocate_id')
     advocate_names = all_advocates.rename(columns={'meta.name': 'name'})[['name']]
     advocate_names['lastname'] = advocate_names['name'].apply(lambda n: HumanName(n).last)
     advocate_names['male_honorific'] = 'Mr. ' + advocate_names['lastname']
@@ -226,7 +221,7 @@ class ComputeGender(Step):
       .replace('', None) \
       .dropna() \
       .reset_index() \
-      .rename(columns={'id': 'conversation_id', 'meta.advocates': 'advocate_id'})
+      .rename(columns={'meta.advocates': 'advocate_id'})
   
     all_honorifics_uttered = self.all_utterances[self.all_utterances.speaker.str.contains('j__')].copy() \
       .set_index('conversation_id')['text'].str.findall(r'(Mr. \w+|Ms. \w+)') \
@@ -254,7 +249,6 @@ class ComputeGender(Step):
 
     # guess missing genders
 
-    from gender_guesser.detector import Detector as GenderDetector
     detector = GenderDetector()
     names_and_honorifics['firstname'] = names_and_honorifics['name'].apply(lambda n: HumanName(n).first)
     names_and_honorifics['gender_det'] = names_and_honorifics['firstname'].apply(detector.get_gender)
@@ -281,7 +275,7 @@ class ComputeExperience(Step):
   EXPERIENCE_PATH = 'flatfiles/experience.csv'
 
   def extract(self):
-    self.all_conversations = pd.read_csv(ReadCorpus.CONVERSATIONS_PATH).set_index('id')
+    self.all_conversations = pd.read_csv(ReadCorpus.CONVERSATIONS_PATH, index_col='conversation_id')
     self.all_conversations['meta.advocates'] = self.all_conversations['meta.advocates'].apply(eval)
     self.all_conversations['meta.votes_side'] = self.all_conversations['meta.votes_side'].apply(eval)
 
@@ -292,7 +286,7 @@ class ComputeExperience(Step):
       .replace('', None) \
       .dropna() \
       .reset_index() \
-      .rename(columns={'id': 'conversation_id', 'meta.advocates': 'advocate_id'})
+      .rename(columns={'meta.advocates': 'advocate_id'})
     self.experience = advocates_per_convo.groupby('advocate_id').count() \
       .rename(columns={'conversation_id': 'experience'})
 
@@ -305,7 +299,7 @@ class MergeFields(Step):
   MERGED_FIELDS_PATH = 'flatfiles/merged_fields.csv'
 
   def extract(self):
-    self.genders = pd.read_csv(ComputeGender.GENDER_PATH).rename(columns={'id': 'advocate_id'})
+    self.genders = pd.read_csv(ComputeGender.GENDER_PATH)
     self.experience = pd.read_csv(ComputeExperience.EXPERIENCE_PATH)
     self.interruptions = pd.read_csv(ComputeInterruptions.INTERRUPTIONS_PATH)
 
@@ -313,10 +307,10 @@ class MergeFields(Step):
     self.merged_fields = self.interruptions.merge(self.genders).merge(self.experience)
 
   def load(self):
-    self.merged_fields.to_csv(self.MERGED_FIELDS_PATH, index=False)
+    self.merged_fields.dropna().to_csv(self.MERGED_FIELDS_PATH, index=False)
 
 
-def run():
+def run(skip=[]):
   import graph_scheduler
   steps = {
     step_class.__name__: step_class 
@@ -331,17 +325,23 @@ def run():
   }
 
   graph = {
-    ReadCorpus.__name__: {},
-    CreateChunks.__name__: {ReadCorpus.__name__},
-    ComputeInterruptions.__name__: {CreateChunks.__name__},
-    ComputeGender.__name__: {ReadCorpus.__name__},
-    ComputeExperience.__name__: {ReadCorpus.__name__},
-    MergeFields.__name__: {ComputeGender.__name__, ComputeExperience.__name__, ComputeInterruptions.__name__}
+    ReadCorpus: {},
+    CreateChunks: {ReadCorpus},
+    ComputeInterruptions: {CreateChunks},
+    ComputeGender: {ReadCorpus},
+    ComputeExperience: {ReadCorpus},
+    MergeFields: {ComputeGender, ComputeExperience, ComputeInterruptions}
   }
 
-  sched = graph_scheduler.Scheduler(graph=graph)
+  stringified_graph = { k.__name__: { v.__name__ for v in graph[k] } for k in graph }
+  sched = graph_scheduler.Scheduler(graph=stringified_graph)
   for steps_to_exec in sched.run():
     for step_name in steps_to_exec:
-      print('Running', step_name)
-      steps[step_name]().run()
+      step = steps[step_name]
+      if step not in skip:
+        print('Running', step_name)
+        step().run()
+      else:
+        print('Skipping', step_name)
 
+# run(skip=[ReadCorpus, CreateChunks])
